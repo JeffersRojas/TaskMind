@@ -1,0 +1,275 @@
+TASKMIND - EXPLICACION COMPLETA DEL PROYECTO (Backend + App Movil)
+
+1) RESUMEN
+TaskMind es una aplicacion movil (Expo + React Native + TypeScript) para gestionar tareas/actividades academicas.
+Incluye:
+- Autenticacion (registro/login) con JSON Web Tokens (JWT).
+- CRUD de tareas (crear, listar, editar, eliminar, marcar completada).
+- Administracion por roles (user/admin):
+  - Solo el rol ADMIN puede crear/administrar usuarios.
+  - Solo el rol ADMIN puede crear/editar/eliminar materias.
+- Materias (Subjects) administrables y vinculadas a las tareas.
+
+
+2) ESTRUCTURA DE CARPETAS
+Dentro de la carpeta Proyecto/ hay dos subproyectos:
+
+2.1) Proyecto/backend_api  (API REST)
+- Node.js + Express + TypeScript
+- MongoDB + Mongoose (persistencia)
+- JWT para autenticacion/autorizacion
+
+Archivos clave:
+- src/index.ts                          -> Arranque del servidor, rutas y middlewares
+- src/config/db.ts                      -> Conexion a MongoDB
+- src/models/User.ts                    -> Modelo de usuarios (incluye role)
+- src/models/Task.ts                    -> Modelo de tareas (incluye subjectId)
+- src/models/Subject.ts                 -> Modelo de materias
+- src/middleware/authMiddleware.ts      -> protect / adminOnly / optionalAuth
+- src/routes/userRoutes.ts              -> Endpoints de usuarios + admin
+- src/routes/taskRoutes.ts              -> Endpoints de tareas (protegidos)
+- src/routes/subjectRoutes.ts           -> Endpoints de materias (admin)
+- src/controllers/userController.ts     -> Logica de login/registro + CRUD admin de usuarios
+- src/controllers/taskController.ts     -> Logica de tareas (CRUD) + validaciones
+- src/controllers/subjectController.ts  -> CRUD de materias
+
+2.2) Proyecto/frontend_mob  (App movil)
+- Expo SDK 54
+- React Native 0.81.x
+- TypeScript
+- La UI y la logica principal estan en App.tsx (pantallas controladas por estado, sin React Navigation).
+
+Archivos clave:
+- App.tsx   -> Login, Register, Home, Nueva Tarea, Detalle, Progreso, Admin
+- package.json / package-lock.json -> Dependencias
+
+
+3) BACKEND: FUNCIONAMIENTO Y COMPONENTES
+
+3.1) Arranque del servidor (src/index.ts)
+- Carga variables de entorno con dotenv.
+- Se conecta a MongoDB con connectDB().
+- Habilita middlewares:
+  - cors() para permitir peticiones desde la app
+  - express.json() para leer body en JSON
+- Monta las rutas:
+  - /api/users
+  - /api/tasks
+  - /api/subjects
+- Endpoint de prueba:
+  - GET / -> "API de TaskMind corriendo..."
+
+3.2) Conexion a MongoDB (src/config/db.ts)
+- Usa process.env.MONGO_URI si existe.
+- Si no existe, usa: mongodb://localhost:27017/taskmind
+
+3.3) Modelo User (src/models/User.ts)
+Campos principales:
+- name: string
+- email: string (unico)
+- password: string (guardado en hash con bcrypt)
+- role: "user" | "admin"
+
+Reglas:
+- Antes de guardar (pre('save')):
+  - Si la password cambio, la encripta con bcrypt.
+- Metodo matchPassword:
+  - Compara password ingresada con el hash almacenado.
+
+3.4) Modelo Subject/Materia (src/models/Subject.ts)
+Campos principales:
+- name: string (unico)
+- colors:
+  - card: string (hex, ejemplo "#3C7BEA")
+  - light: string (hex)
+
+3.5) Modelo Task (src/models/Task.ts)
+Campos principales:
+- user: ObjectId -> referencia al User dueño de la tarea
+- title: string
+- subject: string (nombre de la materia, por compatibilidad)
+- subjectId: ObjectId -> referencia al Subject real
+- dueDate: string
+- priority: "Alta" | "Media" | "Baja"
+- completed: boolean
+
+Importante:
+- subjectId permite vincular tareas a materias creadas por el admin.
+- subject (string) se mantiene para que la app pueda seguir mostrando el nombre facilmente.
+
+3.6) Autenticacion y Roles (src/middleware/authMiddleware.ts)
+Hay 3 piezas clave:
+
+a) protect
+- Lee el header: Authorization: Bearer <token>
+- Verifica el token JWT y extrae el id del usuario
+- Busca el usuario en MongoDB y lo pone en req.user (sin password)
+- Si no hay token o falla => 401
+
+b) adminOnly
+- Requiere que req.user exista y que req.user.role sea "admin"
+- Si no => 403
+
+c) optionalAuth
+- Intenta autenticar si viene token, pero si no viene NO falla.
+- Se usa para permitir el "bootstrap" (primer admin) en el registro.
+
+3.7) Controladores
+
+3.7.1) Usuarios (src/controllers/userController.ts)
+Endpoints principales:
+- POST /api/users/login
+  - Autentica por email/password
+  - Devuelve: _id, name, email, role, token
+
+- POST /api/users
+  - REGLA DE BOOTSTRAP:
+    - Si NO hay usuarios creados aun:
+      - El primer usuario se crea como ADMIN automaticamente.
+      - Se crean materias base (Matematicas, Ciencias, Espanol, Historia) si no existian.
+    - Si YA hay usuarios:
+      - Solo un ADMIN autenticado puede crear nuevos usuarios.
+      - Permite crear usuario con role user o admin (segun body.role).
+
+Admin (solo ADMIN):
+- GET /api/users
+  - Lista usuarios (sin password)
+- PUT /api/users/:id
+  - Edita name/email/password/role
+- DELETE /api/users/:id
+  - Elimina un usuario
+
+3.7.2) Tareas (src/controllers/taskController.ts)
+Todos los endpoints de tareas requieren token (protect):
+- GET /api/tasks
+  - Lista tareas del usuario (find por user: req.user._id)
+  - Hace populate de subjectId para tener datos de la materia
+
+- POST /api/tasks
+  - Crea una tarea del usuario
+  - Valida materia:
+    - Si viene subjectId, busca Subject por _id
+    - Si viene subject (string), busca Subject por name
+    - Si no existe => error 400 ("Materia no encontrada...")
+
+- PUT /api/tasks/:id
+  - Actualiza tarea
+  - Verifica que la tarea pertenezca al usuario logueado (owner check)
+  - Si se cambia materia, valida igual que en createTask
+
+- DELETE /api/tasks/:id
+  - Elimina tarea
+  - Verifica dueño (owner check)
+
+3.7.3) Materias (src/controllers/subjectController.ts)
+Rutas:
+- GET /api/subjects        -> requiere login (protect)
+- POST /api/subjects       -> solo admin (protect + adminOnly)
+- PUT /api/subjects/:id    -> solo admin
+- DELETE /api/subjects/:id -> solo admin
+
+Al crear materia:
+- Si no pasan colores, el backend genera colores por defecto.
+
+
+4) FRONTEND (APP MOVIL): FUNCIONAMIENTO
+
+4.1) Configuracion del API
+En App.tsx:
+- Se arma un API_URL basado en EXPO_PUBLIC_API_HOST y EXPO_PUBLIC_API_PORT.
+Ejemplo:
+  API_URL = http://<HOST>:<PORT>/api
+
+Nota:
+- Si el backend cambia de IP (cambio de red), debes actualizar el host.
+
+4.2) Pantallas (sin navegación externa)
+La app usa un estado "screen" que controla que vista renderizar:
+- login
+- register
+- home
+- new-task
+- detail
+- progress
+- admin
+
+4.3) Login
+- Envia POST /api/users/login
+- Si ok:
+  - guarda userData con token y role
+  - pasa a home
+
+4.4) Carga de materias y tareas al loguearse
+Despues del login:
+- GET /api/subjects
+- GET /api/tasks
+ambos con Authorization: Bearer <token>
+
+4.5) CRUD de tareas
+- Crear: POST /api/tasks
+- Completar: PUT /api/tasks/:id (solo cambia completed)
+- Editar: PUT /api/tasks/:id
+- Eliminar: DELETE /api/tasks/:id
+
+4.6) Materias dinamicas
+- En "Nueva tarea", el selector de materia usa:
+  - Lista desde el backend si existe
+  - Si no, cae a una lista por defecto
+
+4.7) Pantalla ADMIN
+Solo aparece el boton "Admin" en Home cuando userData.role === "admin".
+La pantalla Admin permite:
+
+a) Materias
+- Crear materia (POST /api/subjects)
+- Eliminar materia (DELETE /api/subjects/:id)
+
+b) Usuarios
+- Crear usuario (POST /api/users) con role user o admin
+- Cambiar rol (PUT /api/users/:id)
+- Eliminar usuario (DELETE /api/users/:id)
+
+
+5) COMO EJECUTAR EL PROYECTO
+
+5.1) Backend (API)
+En terminal:
+cd Proyecto/backend_api
+npm install
+npm run dev
+
+Variables recomendadas en Proyecto/backend_api/.env (NO subir a GitHub):
+- MONGO_URI=mongodb://localhost:27017/taskmind   (o tu URI real)
+- JWT_SECRET=una_clave_segura
+- PORT=5000
+
+5.2) Frontend (Expo)
+En terminal:
+cd Proyecto/frontend_mob
+npm install
+npm start
+
+Para definir host/puerto del API en Expo:
+- EXPO_PUBLIC_API_HOST=TU_IP
+- EXPO_PUBLIC_API_PORT=5000
+
+
+6) SEGURIDAD Y BUENAS PRACTICAS
+- No subir .env a GitHub.
+- Cambiar JWT_SECRET por un valor real y seguro.
+- En produccion, usar HTTPS y configurar CORS correctamente.
+
+
+7) FLUJO TIPICO DE USO (EJEMPLO)
+1) Registrar primer usuario:
+   - POST /api/users (sin token)
+   - Se crea como ADMIN automaticamente si no habia usuarios.
+2) Login:
+   - POST /api/users/login
+3) Admin crea materias adicionales:
+   - POST /api/subjects
+4) Admin crea usuarios para estudiantes:
+   - POST /api/users (con token admin)
+5) Estudiante login y gestiona tareas:
+   - GET/POST/PUT/DELETE /api/tasks
+

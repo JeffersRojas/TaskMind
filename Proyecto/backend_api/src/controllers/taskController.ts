@@ -1,23 +1,38 @@
 import { Response } from 'express';
 import { AuthRequest } from '../middleware/authMiddleware.js';
 import Task from '../models/Task.js';
+import Subject from '../models/Subject.js';
 
 // @desc    Obtener todas las tareas del usuario
 // @route   GET /api/tasks
 export const getTasks = async (req: AuthRequest, res: Response) => {
-  const tasks = await Task.find({ user: req.user._id });
+  const tasks = await Task.find({ user: req.user._id }).populate('subjectId');
   res.json(tasks);
 };
 
 // @desc    Crear una nueva tarea
 // @route   POST /api/tasks
 export const createTask = async (req: AuthRequest, res: Response) => {
-  const { title, subject, dueDate, priority } = req.body;
+  const { title, subject, subjectId, dueDate, priority } = req.body;
+
+  let resolvedSubject: any = null;
+
+  if (subjectId) {
+    resolvedSubject = await Subject.findById(subjectId);
+  } else if (subject) {
+    resolvedSubject = await Subject.findOne({ name: subject });
+  }
+
+  if (!resolvedSubject) {
+    res.status(400).json({ message: 'Materia no encontrada. Pide al administrador crearla.' });
+    return;
+  }
 
   const task = new Task({
     user: req.user._id,
     title,
-    subject,
+    subject: resolvedSubject.name,
+    subjectId: resolvedSubject._id,
     dueDate,
     priority,
     completed: false,
@@ -30,7 +45,7 @@ export const createTask = async (req: AuthRequest, res: Response) => {
 // @desc    Actualizar una tarea
 // @route   PUT /api/tasks/:id
 export const updateTask = async (req: AuthRequest, res: Response) => {
-  const { title, subject, dueDate, priority, completed } = req.body;
+  const { title, subject, subjectId, dueDate, priority, completed } = req.body;
 
   const task = await Task.findById(req.params.id);
 
@@ -41,7 +56,22 @@ export const updateTask = async (req: AuthRequest, res: Response) => {
     }
 
     task.title = title || task.title;
-    task.subject = subject || task.subject;
+    if (subjectId || subject) {
+      let resolvedSubject: any = null;
+      if (subjectId) {
+        resolvedSubject = await Subject.findById(subjectId);
+      } else if (subject) {
+        resolvedSubject = await Subject.findOne({ name: subject });
+      }
+
+      if (!resolvedSubject) {
+        res.status(400).json({ message: 'Materia no encontrada. Pide al administrador crearla.' });
+        return;
+      }
+
+      task.subject = resolvedSubject.name;
+      task.subjectId = resolvedSubject._id;
+    }
     task.dueDate = dueDate || task.dueDate;
     task.priority = priority || task.priority;
     task.completed = completed !== undefined ? completed : task.completed;

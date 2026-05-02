@@ -13,7 +13,10 @@ const taskSchema = new mongoose.Schema({
   subject: {
     type: String,
     required: true,
-    enum: ['Matemáticas', 'Ciencias', 'Español', 'Historia'],
+  },
+  subjectId: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'Subject',
   },
   dueDate: {
     type: String,

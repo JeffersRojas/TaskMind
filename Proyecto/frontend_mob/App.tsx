@@ -3,25 +3,38 @@ import { useMemo, useState, useEffect } from 'react';
 import {
   ActivityIndicator,
   Pressable,
-  SafeAreaView,
   ScrollView,
   StyleSheet,
   Text,
   TextInput,
   View,
 } from 'react-native';
+import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
 
-const API_URL = 'http://10.93.167.140:5000/api'; // IP local de tu computadora
+const API_HOST = process.env.EXPO_PUBLIC_API_HOST ?? '172.28.95.140';
+const API_PORT = process.env.EXPO_PUBLIC_API_PORT ?? '5000';
+const API_URL = `http://${API_HOST}:${API_PORT}/api`;
+
+async function fetchWithTimeout(url: string, init: RequestInit = {}, timeoutMs = 10000) {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(url, { ...init, signal: controller.signal });
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
 
 type Priority = 'Alta' | 'Media' | 'Baja';
-type Subject = 'Matemáticas' | 'Ciencias' | 'Español' | 'Historia';
-type Screen = 'login' | 'register' | 'home' | 'new-task' | 'detail' | 'progress';
+type Subject = string;
+type Screen = 'login' | 'register' | 'home' | 'new-task' | 'detail' | 'progress' | 'admin';
 
 type Task = {
   _id: string; // MongoDB usa _id
   id?: string; // Para compatibilidad
   title: string;
   subject: Subject;
+  subjectId?: any;
   dueDate: string;
   priority: Priority;
   completed: boolean;
@@ -31,6 +44,7 @@ type UserData = {
   _id: string;
   name: string;
   email: string;
+  role?: 'admin' | 'user';
   token: string;
 };
 
@@ -61,15 +75,27 @@ type Account = {
   password: string;
 };
 
-const subjectColors: Record<Subject, { card: string; light: string }> = {
+type SubjectColors = { card: string; light: string };
+type SubjectFromApi = { _id: string; name: string; colors: SubjectColors };
+
+const defaultSubjectList: Subject[] = ['Matemáticas', 'Ciencias', 'Español', 'Historia'];
+const defaultSubjectColors: Record<string, SubjectColors> = {
   Matemáticas: { card: '#3C7BEA', light: '#DCE7FF' },
   Ciencias: { card: '#71B452', light: '#E3F2DA' },
   Español: { card: '#8467D7', light: '#E7DEFF' },
   Historia: { card: '#E29A4B', light: '#FBE8D4' },
 };
 
+function getPaletteForSubject(
+  subject: string,
+  paletteMap: Record<string, SubjectColors>,
+): SubjectColors {
+  return paletteMap[subject] ?? { card: '#3C7BEA', light: '#DCE7FF' };
+}
+
 const initialTasks: Task[] = [
   {
+    _id: '1',
     id: '1',
     title: 'Taller 3',
     subject: 'Matemáticas',
@@ -78,6 +104,7 @@ const initialTasks: Task[] = [
     completed: false,
   },
   {
+    _id: '2',
     id: '2',
     title: 'Exposición',
     subject: 'Ciencias',
@@ -86,6 +113,7 @@ const initialTasks: Task[] = [
     completed: false,
   },
   {
+    _id: '3',
     id: '3',
     title: 'Ensayo',
     subject: 'Español',
@@ -94,6 +122,7 @@ const initialTasks: Task[] = [
     completed: true,
   },
   {
+    _id: '4',
     id: '4',
     title: 'Resumen',
     subject: 'Historia',
@@ -150,11 +179,35 @@ export default function App() {
   const [loginError, setLoginError] = useState('');
   const [loginMessage, setLoginMessage] = useState('');
   const [registerError, setRegisterError] = useState('');
+  const [subjects, setSubjects] = useState<SubjectFromApi[]>([]);
+  const [adminUsers, setAdminUsers] = useState<any[]>([]);
+  const [adminUserForm, setAdminUserForm] = useState({
+    name: '',
+    email: '',
+    password: '',
+    role: 'user' as 'user' | 'admin',
+  });
+  const [newSubjectName, setNewSubjectName] = useState('');
+  const [adminError, setAdminError] = useState('');
+  const [adminBusy, setAdminBusy] = useState(false);
 
   const selectedTask = tasks.find((task) => task._id === selectedTaskId) || tasks[0];
   const completedCount = tasks.filter((task) => task.completed).length;
   const pendingCount = tasks.length - completedCount;
   const progress = tasks.length === 0 ? 0 : Math.round((completedCount / tasks.length) * 100);
+
+  const subjectPaletteByName = useMemo(() => {
+    const fromApi: Record<string, SubjectColors> = {};
+    for (const s of subjects) {
+      fromApi[s.name] = s.colors;
+    }
+    return { ...defaultSubjectColors, ...fromApi };
+  }, [subjects]);
+
+  const availableSubjects = useMemo(() => {
+    const apiNames = subjects.map((s) => s.name);
+    return apiNames.length > 0 ? apiNames : defaultSubjectList;
+  }, [subjects]);
 
   const weeklyMessage = useMemo(() => {
     if (progress >= 75) {
@@ -183,25 +236,205 @@ export default function App() {
   // Cargar tareas cuando el usuario se loguea
   useEffect(() => {
     if (userData) {
+      fetchSubjects();
       fetchTasks();
     }
   }, [userData]);
 
-  const fetchTasks = async () => {
+  useEffect(() => {
+    if (screen === 'admin' && userData?.role === 'admin') {
+      refreshAdminData();
+    }
+  }, [screen, userData]);
+
+  const fetchSubjects = async () => {
     if (!userData) return;
-    setIsLoading(true);
     try {
-      const response = await fetch(`${API_URL}/tasks`, {
+      const response = await fetchWithTimeout(`${API_URL}/subjects`, {
         headers: {
           'Authorization': `Bearer ${userData.token}`
         }
       });
       const data = await response.json();
-      setTasks(data);
+      if (response.ok && Array.isArray(data)) {
+        setSubjects(data);
+        if (!form.subject && data.length > 0) {
+          setForm((current) => ({ ...current, subject: data[0].name }));
+        }
+      }
+    } catch (error) {
+      setSubjects([]);
+    }
+  };
+
+  const fetchTasks = async () => {
+    if (!userData) return;
+    setIsLoading(true);
+    try {
+      const response = await fetchWithTimeout(`${API_URL}/tasks`, {
+        headers: {
+          'Authorization': `Bearer ${userData.token}`
+        }
+      });
+      const data = await response.json();
+      setTasks(Array.isArray(data) ? data : []);
     } catch (error) {
       console.error('Error al cargar tareas:', error);
     } finally {
       setIsLoading(false);
+    }
+  };
+
+  const fetchUsers = async () => {
+    if (!userData) return;
+    const response = await fetchWithTimeout(`${API_URL}/users`, {
+      headers: {
+        'Authorization': `Bearer ${userData.token}`
+      }
+    });
+    const data = await response.json();
+    if (response.ok && Array.isArray(data)) {
+      setAdminUsers(data);
+      setAdminError('');
+      return;
+    }
+    setAdminError(data?.message || 'No se pudieron cargar los usuarios');
+  };
+
+  const refreshAdminData = async () => {
+    setAdminBusy(true);
+    try {
+      await Promise.all([fetchSubjects(), fetchUsers()]);
+    } finally {
+      setAdminBusy(false);
+    }
+  };
+
+  const createAdminUser = async () => {
+    if (!userData) return;
+    const name = adminUserForm.name.trim();
+    const email = adminUserForm.email.trim().toLowerCase();
+    const password = adminUserForm.password.trim();
+    const role = adminUserForm.role;
+
+    if (!name || !email || !password) {
+      setAdminError('Completa nombre, correo y contraseña.');
+      return;
+    }
+
+    setAdminBusy(true);
+    try {
+      const response = await fetchWithTimeout(`${API_URL}/users`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${userData.token}`
+        },
+        body: JSON.stringify({ name, email, password, role })
+      });
+      const data = await response.json();
+      if (!response.ok) {
+        setAdminError(data?.message || 'No se pudo crear el usuario');
+        return;
+      }
+      setAdminUserForm({ name: '', email: '', password: '', role: 'user' });
+      await fetchUsers();
+    } finally {
+      setAdminBusy(false);
+    }
+  };
+
+  const updateAdminUserRole = async (targetUserId: string, role: 'user' | 'admin') => {
+    if (!userData) return;
+    setAdminBusy(true);
+    try {
+      const response = await fetchWithTimeout(`${API_URL}/users/${targetUserId}`, {
+        method: 'PUT',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${userData.token}`
+        },
+        body: JSON.stringify({ role })
+      });
+      const data = await response.json();
+      if (!response.ok) {
+        setAdminError(data?.message || 'No se pudo actualizar el usuario');
+        return;
+      }
+      await fetchUsers();
+    } finally {
+      setAdminBusy(false);
+    }
+  };
+
+  const deleteAdminUser = async (targetUserId: string) => {
+    if (!userData) return;
+    setAdminBusy(true);
+    try {
+      const response = await fetchWithTimeout(`${API_URL}/users/${targetUserId}`, {
+        method: 'DELETE',
+        headers: {
+          'Authorization': `Bearer ${userData.token}`
+        }
+      });
+      const data = await response.json();
+      if (!response.ok) {
+        setAdminError(data?.message || 'No se pudo eliminar el usuario');
+        return;
+      }
+      await fetchUsers();
+    } finally {
+      setAdminBusy(false);
+    }
+  };
+
+  const createSubjectFromAdmin = async () => {
+    if (!userData) return;
+    const name = newSubjectName.trim();
+    if (!name) {
+      setAdminError('Escribe el nombre de la materia.');
+      return;
+    }
+    setAdminBusy(true);
+    try {
+      const response = await fetchWithTimeout(`${API_URL}/subjects`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${userData.token}`
+        },
+        body: JSON.stringify({ name })
+      });
+      const data = await response.json();
+      if (!response.ok) {
+        setAdminError(data?.message || 'No se pudo crear la materia');
+        return;
+      }
+      setNewSubjectName('');
+      await fetchSubjects();
+    } finally {
+      setAdminBusy(false);
+    }
+  };
+
+  const deleteSubjectFromAdmin = async (subjectId: string) => {
+    if (!userData) return;
+    setAdminBusy(true);
+    try {
+      const response = await fetchWithTimeout(`${API_URL}/subjects/${subjectId}`, {
+        method: 'DELETE',
+        headers: {
+          'Authorization': `Bearer ${userData.token}`
+        }
+      });
+      const data = await response.json();
+      if (!response.ok) {
+        setAdminError(data?.message || 'No se pudo eliminar la materia');
+        return;
+      }
+      await fetchSubjects();
+    } finally {
+      setAdminBusy(false);
     }
   };
 
@@ -216,7 +449,7 @@ export default function App() {
 
     setIsLoading(true);
     try {
-      const response = await fetch(`${API_URL}/users/login`, {
+      const response = await fetchWithTimeout(`${API_URL}/users/login`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ email, password })
@@ -255,7 +488,7 @@ export default function App() {
 
     setIsLoading(true);
     try {
-      const response = await fetch(`${API_URL}/users`, {
+      const response = await fetchWithTimeout(`${API_URL}/users`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ name, email, password })
@@ -295,7 +528,7 @@ export default function App() {
     if (!taskToToggle) return;
 
     try {
-      const response = await fetch(`${API_URL}/tasks/${taskId}`, {
+      const response = await fetchWithTimeout(`${API_URL}/tasks/${taskId}`, {
         method: 'PUT',
         headers: {
           'Content-Type': 'application/json',
@@ -317,7 +550,7 @@ export default function App() {
 
     setIsLoading(true);
     try {
-      const response = await fetch(`${API_URL}/tasks`, {
+      const response = await fetchWithTimeout(`${API_URL}/tasks`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -345,7 +578,7 @@ export default function App() {
 
     setIsLoading(true);
     try {
-      const response = await fetch(`${API_URL}/tasks/${selectedTask._id}`, {
+      const response = await fetchWithTimeout(`${API_URL}/tasks/${selectedTask._id}`, {
         method: 'DELETE',
         headers: {
           'Authorization': `Bearer ${userData.token}`
@@ -368,7 +601,7 @@ export default function App() {
 
     setIsLoading(true);
     try {
-      const response = await fetch(`${API_URL}/tasks/${selectedTask._id}`, {
+      const response = await fetchWithTimeout(`${API_URL}/tasks/${selectedTask._id}`, {
         method: 'PUT',
         headers: {
           'Content-Type': 'application/json',
@@ -390,9 +623,10 @@ export default function App() {
   };
 
   return (
-    <SafeAreaView style={styles.safeArea}>
-      <StatusBar style="dark" />
-      <View style={styles.phoneFrame}>
+    <SafeAreaProvider>
+      <SafeAreaView style={styles.safeArea}>
+        <StatusBar style="dark" />
+        <View style={styles.phoneFrame}>
         {screen === 'login' && (
           <View style={styles.screenContainer}>
             <View style={styles.loginHero}>
@@ -495,7 +729,7 @@ export default function App() {
               <View style={styles.loginHero}>
                 <Text style={styles.loginTitle}>Regístrate</Text>
                 <Text style={styles.loginSubtitle}>
-                  Crea tu usuario local para entrar a la app con tus propias credenciales.
+                  Si ya existe un administrador, solo él puede crear nuevas cuentas. Si es la primera cuenta, se creará como administrador.
                 </Text>
               </View>
 
@@ -551,7 +785,7 @@ export default function App() {
                 </Field>
 
                 <Text style={registerError ? styles.loginError : styles.loginHint}>
-                  {registerError || 'Regístrate para guardar tus tareas en la nube.'}
+                  {registerError || 'Si el registro está bloqueado, pide al administrador que te cree el usuario.'}
                 </Text>
 
                 {isLoading && <ActivityIndicator size="large" color="#3C7BEA" style={{ marginVertical: 10 }} />}
@@ -572,6 +806,11 @@ export default function App() {
                 <Text style={styles.logo}>🎓 TaskMind</Text>
               </View>
               <View style={styles.topBarActions}>
+                {userData?.role === 'admin' && (
+                  <Pressable onPress={() => setScreen('admin')} style={styles.headerChip}>
+                    <Text style={styles.headerChipText}>Admin</Text>
+                  </Pressable>
+                )}
                 <Pressable onPress={() => setScreen('progress')} style={styles.headerChip}>
                   <Text style={styles.headerChipText}>Progreso</Text>
                 </Pressable>
@@ -584,7 +823,7 @@ export default function App() {
               showsVerticalScrollIndicator={false}
             >
               {tasks.map((task) => {
-                const palette = subjectColors[task.subject];
+                const palette = getPaletteForSubject(task.subject, subjectPaletteByName);
 
                 return (
                   <Pressable
@@ -663,7 +902,7 @@ export default function App() {
 
               <Field label="Materia">
                 <View style={styles.selector}>
-                  {(['Matemáticas', 'Ciencias', 'Español', 'Historia'] as Subject[]).map(
+                  {availableSubjects.map(
                     (subject) => (
                       <Pressable
                         key={subject}
@@ -754,7 +993,7 @@ export default function App() {
               <View
                 style={[
                   styles.detailBanner,
-                  { backgroundColor: subjectColors[selectedTask.subject].card },
+                  { backgroundColor: getPaletteForSubject(selectedTask.subject, subjectPaletteByName).card },
                 ]}
               >
                 <Text style={styles.detailBannerText}>🎓 {selectedTask.subject}</Text>
@@ -782,6 +1021,178 @@ export default function App() {
                 <Text style={styles.secondaryButtonText}>Eliminar</Text>
               </Pressable>
             </View>
+          </View>
+        )}
+
+        {screen === 'admin' && (
+          <View style={styles.screenContainer}>
+            <View style={styles.headerBar}>
+              <Pressable onPress={() => setScreen('home')}>
+                <Text style={styles.headerIcon}>‹</Text>
+              </Pressable>
+              <Text style={styles.headerTitle}>Administración</Text>
+              <View style={styles.headerSpacer} />
+            </View>
+
+            {userData?.role !== 'admin' ? (
+              <View style={styles.loginCard}>
+                <Text style={styles.loginError}>Acceso denegado: solo administradores.</Text>
+              </View>
+            ) : (
+              <ScrollView
+                style={styles.scrollArea}
+                contentContainerStyle={styles.adminContainer}
+                showsVerticalScrollIndicator={false}
+              >
+                {adminError ? (
+                  <View style={styles.adminBannerError}>
+                    <Text style={styles.adminBannerErrorText}>{adminError}</Text>
+                  </View>
+                ) : null}
+
+                <View style={styles.loginCard}>
+                  <View style={styles.adminCardHeader}>
+                    <Text style={styles.adminCardTitle}>Materias</Text>
+                    <Pressable onPress={refreshAdminData} style={styles.adminSmallButton} disabled={adminBusy}>
+                      <Text style={styles.adminSmallButtonText}>Actualizar</Text>
+                    </Pressable>
+                  </View>
+
+                  <Field label="Nueva materia">
+                    <TextInput
+                      placeholder="Ej. Inglés"
+                      placeholderTextColor="#9A9A9A"
+                      style={styles.input}
+                      value={newSubjectName}
+                      onChangeText={setNewSubjectName}
+                    />
+                  </Field>
+
+                  <Pressable onPress={createSubjectFromAdmin} style={styles.primaryButton} disabled={adminBusy}>
+                    <Text style={styles.primaryButtonText}>Crear materia</Text>
+                  </Pressable>
+
+                  <View style={styles.adminList}>
+                    {subjects.map((s) => (
+                      <View key={s._id} style={styles.adminRow}>
+                        <View style={styles.adminRowLeftInline}>
+                          <View style={[styles.adminColorDot, { backgroundColor: s.colors.card }]} />
+                          <Text style={styles.adminRowTitle}>{s.name}</Text>
+                        </View>
+                        <Pressable
+                          onPress={() => deleteSubjectFromAdmin(s._id)}
+                          style={styles.adminDangerSmallButton}
+                          disabled={adminBusy}
+                        >
+                          <Text style={styles.adminSmallButtonText}>Eliminar</Text>
+                        </Pressable>
+                      </View>
+                    ))}
+                  </View>
+                </View>
+
+                <View style={styles.loginCard}>
+                  <Text style={styles.adminCardTitle}>Usuarios</Text>
+
+                  <Field label="Nombre">
+                    <TextInput
+                      placeholder="Ej. Juan Pérez"
+                      placeholderTextColor="#9A9A9A"
+                      style={styles.input}
+                      value={adminUserForm.name}
+                      onChangeText={(name) => setAdminUserForm((current) => ({ ...current, name }))}
+                    />
+                  </Field>
+
+                  <Field label="Correo">
+                    <TextInput
+                      placeholder="ejemplo@correo.com"
+                      placeholderTextColor="#9A9A9A"
+                      style={styles.input}
+                      value={adminUserForm.email}
+                      autoCapitalize="none"
+                      keyboardType="email-address"
+                      onChangeText={(email) => setAdminUserForm((current) => ({ ...current, email }))}
+                    />
+                  </Field>
+
+                  <Field label="Contraseña">
+                    <TextInput
+                      placeholder="Mínimo 4 caracteres"
+                      placeholderTextColor="#9A9A9A"
+                      style={styles.input}
+                      value={adminUserForm.password}
+                      secureTextEntry
+                      onChangeText={(password) => setAdminUserForm((current) => ({ ...current, password }))}
+                    />
+                  </Field>
+
+                  <Field label="Rol">
+                    <View style={styles.selector}>
+                      {(['user', 'admin'] as const).map((role) => (
+                        <Pressable
+                          key={role}
+                          onPress={() => setAdminUserForm((current) => ({ ...current, role }))}
+                          style={[
+                            styles.selectorOption,
+                            adminUserForm.role === role && styles.selectorOptionActive,
+                          ]}
+                        >
+                          <Text
+                            style={[
+                              styles.selectorText,
+                              adminUserForm.role === role && styles.selectorTextActive,
+                            ]}
+                          >
+                            {role === 'admin' ? 'Administrador' : 'Usuario'}
+                          </Text>
+                        </Pressable>
+                      ))}
+                    </View>
+                  </Field>
+
+                  <Pressable onPress={createAdminUser} style={styles.primaryButton} disabled={adminBusy}>
+                    <Text style={styles.primaryButtonText}>Crear usuario</Text>
+                  </Pressable>
+
+                  <View style={styles.adminList}>
+                    {adminUsers.map((u: any) => (
+                      <View key={u._id} style={styles.adminRow}>
+                        <View style={styles.adminRowLeft}>
+                          <Text style={styles.adminRowTitle}>{u.name}</Text>
+                          <Text style={styles.adminRowSubtitle}>{u.email}</Text>
+                        </View>
+                        <View style={styles.adminRowRight}>
+                          <Pressable
+                            onPress={() => updateAdminUserRole(u._id, u.role === 'admin' ? 'user' : 'admin')}
+                            style={styles.adminSmallButton}
+                            disabled={adminBusy}
+                          >
+                            <Text style={styles.adminSmallButtonText}>
+                              {u.role === 'admin' ? 'Hacer usuario' : 'Hacer admin'}
+                            </Text>
+                          </Pressable>
+                          <Pressable
+                            onPress={() => deleteAdminUser(u._id)}
+                            style={styles.adminDangerSmallButton}
+                            disabled={adminBusy}
+                          >
+                            <Text style={styles.adminSmallButtonText}>Eliminar</Text>
+                          </Pressable>
+                        </View>
+                      </View>
+                    ))}
+                  </View>
+                </View>
+
+                {adminBusy && (
+                  <View style={styles.adminBusyRow}>
+                    <ActivityIndicator size="small" color="#3C7BEA" />
+                    <Text style={styles.adminBusyText}>Procesando…</Text>
+                  </View>
+                )}
+              </ScrollView>
+            )}
           </View>
         )}
 
@@ -816,8 +1227,9 @@ export default function App() {
             </Pressable>
           </View>
         )}
-      </View>
-    </SafeAreaView>
+        </View>
+      </SafeAreaView>
+    </SafeAreaProvider>
   );
 }
 
@@ -929,6 +1341,102 @@ const styles = StyleSheet.create({
     padding: 20,
     gap: 18,
     marginBottom: 22,
+  },
+  adminContainer: {
+    gap: 18,
+    paddingBottom: 40,
+  },
+  adminCardHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 12,
+  },
+  adminCardTitle: {
+    color: '#2F4668',
+    fontSize: 20,
+    fontWeight: '800',
+  },
+  adminBannerError: {
+    backgroundColor: '#FFE6E6',
+    borderRadius: 14,
+    paddingVertical: 12,
+    paddingHorizontal: 14,
+  },
+  adminBannerErrorText: {
+    color: '#8A2D2D',
+    fontWeight: '800',
+  },
+  adminList: {
+    gap: 10,
+  },
+  adminRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 12,
+    paddingVertical: 10,
+    paddingHorizontal: 12,
+    borderRadius: 14,
+    backgroundColor: '#F6F8FC',
+  },
+  adminRowLeft: {
+    flex: 1,
+    gap: 2,
+  },
+  adminRowLeftInline: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+  },
+  adminRowRight: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  adminRowTitle: {
+    color: '#2F4668',
+    fontWeight: '800',
+    fontSize: 15,
+  },
+  adminRowSubtitle: {
+    color: '#6B7F9A',
+    fontWeight: '700',
+    fontSize: 12,
+  },
+  adminColorDot: {
+    width: 10,
+    height: 10,
+    borderRadius: 999,
+    marginRight: 8,
+  },
+  adminSmallButton: {
+    backgroundColor: '#E7F0FF',
+    borderRadius: 999,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+  },
+  adminDangerSmallButton: {
+    backgroundColor: '#FFE2E1',
+    borderRadius: 999,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+  },
+  adminSmallButtonText: {
+    color: '#2F5D9A',
+    fontWeight: '900',
+    fontSize: 12,
+  },
+  adminBusyRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 10,
+    paddingVertical: 10,
+  },
+  adminBusyText: {
+    color: '#3468B3',
+    fontWeight: '800',
   },
   loginHint: {
     color: '#5A7397',
